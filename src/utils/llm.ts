@@ -18,6 +18,57 @@ export interface LLMOptions {
   taskType?: TaskType
 }
 
+// ─── LLM Interaction Tracking ────────────────────────────────
+
+export interface LLMInteraction {
+  id: string
+  timestamp: string
+  model: string
+  taskType: TaskType | 'unknown'
+  promptSummary: string
+  responseSummary: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  costUSD: number
+  latencyMs: number
+  success: boolean
+  error?: string
+  fallbacksUsed: number
+}
+
+const interactionBuffer: LLMInteraction[] = []
+const MAX_INTERACTIONS = 200
+
+/** Listeners for real-time interaction events */
+type InteractionListener = (interaction: LLMInteraction) => void
+const interactionListeners: Set<InteractionListener> = new Set()
+
+export function onInteraction(listener: InteractionListener): () => void {
+  interactionListeners.add(listener)
+  return () => { interactionListeners.delete(listener) }
+}
+
+function emitInteraction(interaction: LLMInteraction): void {
+  interactionBuffer.push(interaction)
+  if (interactionBuffer.length > MAX_INTERACTIONS) interactionBuffer.splice(0, interactionBuffer.length - MAX_INTERACTIONS)
+  for (const listener of interactionListeners) {
+    try { listener(interaction) } catch { /* ignore */ }
+  }
+}
+
+export function getInteractions(limit = 50): LLMInteraction[] {
+  return interactionBuffer.slice(-limit)
+}
+
+function summarizePrompt(messages: LLMMessage[]): string {
+  const sys = messages.find(m => m.role === 'system')
+  const user = messages.find(m => m.role === 'user')
+  const sysSummary = sys ? sys.content.slice(0, 120).replace(/\n/g, ' ') : ''
+  const userSummary = user ? user.content.slice(0, 80).replace(/\n/g, ' ') : ''
+  return `[system] ${sysSummary}... [user] ${userSummary}...`
+}
+
 /**
  * Smart LLM client with automatic model routing.
  *
@@ -54,18 +105,39 @@ export async function chat(
 
   // Try each model in order
   let lastError: Error | null = null
+  const interactionId = `llm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const globalStart = Date.now()
 
   for (let i = 0; i < modelsToTry.length; i++) {
     const model = modelsToTry[i]
     const start = Date.now()
 
     try {
-      const result = await callOpenRouter(messages, model, config.llm.apiKey, options)
-      recordModelResult(model, true, Date.now() - start)
+      const { content: result, usage } = await callOpenRouter(messages, model, config.llm.apiKey, options)
+      const latencyMs = Date.now() - start
+      recordModelResult(model, true, latencyMs)
 
       if (i > 0) {
         log('info', 'llm', `Succeeded with fallback model ${model} (attempt ${i + 1})`)
       }
+
+      // Track interaction
+      const { estimateCost } = await import('./router.js')
+      emitInteraction({
+        id: interactionId,
+        timestamp: new Date().toISOString(),
+        model,
+        taskType: options.taskType || 'unknown',
+        promptSummary: summarizePrompt(messages),
+        responseSummary: result.slice(0, 200).replace(/\n/g, ' '),
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        totalTokens: usage.totalTokens,
+        costUSD: estimateCost(model, usage.inputTokens, usage.outputTokens),
+        latencyMs,
+        success: true,
+        fallbacksUsed: i,
+      })
 
       return result
     } catch (err) {
@@ -77,7 +149,27 @@ export async function chat(
     }
   }
 
+  // Track failed interaction
+  emitInteraction({
+    id: interactionId,
+    timestamp: new Date().toISOString(),
+    model: modelsToTry[0] || 'unknown',
+    taskType: options.taskType || 'unknown',
+    promptSummary: summarizePrompt(messages),
+    responseSummary: '',
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0,
+    latencyMs: Date.now() - globalStart,
+    success: false,
+    error: String(lastError).slice(0, 200),
+    fallbacksUsed: modelsToTry.length - 1,
+  })
+
   throw lastError || new Error('All models failed')
+}
+
+interface CallResult {
+  content: string
+  usage: { inputTokens: number; outputTokens: number; totalTokens: number }
 }
 
 async function callOpenRouter(
@@ -85,9 +177,10 @@ async function callOpenRouter(
   model: string,
   apiKey: string,
   options: LLMOptions
-): Promise<string> {
+): Promise<CallResult> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 300_000) // 5 min timeout
+  const timeoutMs = model.includes('deepseek') ? 600_000 : 300_000 // 10min for DeepSeek, 5min others
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const res = await fetch(OPENROUTER_URL, {
@@ -111,13 +204,33 @@ async function callOpenRouter(
     if (!res.ok) throw new Error(`OpenRouter ${res.status} [${model}]: ${text.slice(0, 300)}`)
 
     const data = JSON.parse(text)
-    const content = data?.choices?.[0]?.message?.content
+    let content = data?.choices?.[0]?.message?.content
     if (!content) throw new Error(`OpenRouter [${model}]: empty response`)
 
-    const tokens = data?.usage?.total_tokens || 0
-    log('debug', 'llm', `✓ ${model} — ${tokens} tokens, ${content.length} chars`)
+    // Handle array content (some models return [{type:'text', text:'...'}])
+    if (Array.isArray(content)) {
+      content = content
+        .filter((p: { type?: string; text?: string }) => p?.type === 'text' && typeof p.text === 'string')
+        .map((p: { text: string }) => p.text)
+        .join('')
+    }
 
-    return typeof content === 'string' ? content.trim() : JSON.stringify(content)
+    if (typeof content !== 'string') content = JSON.stringify(content)
+    content = content.trim()
+
+    // Validate: if response is too short or looks like a header, reject it
+    if (content.length < 50 || /^(encoding|charset|content-type)/i.test(content)) {
+      throw new Error(`OpenRouter [${model}]: invalid response (${content.length} chars): "${content.slice(0, 100)}"`)
+    }
+
+    const usage = {
+      inputTokens: data?.usage?.prompt_tokens || 0,
+      outputTokens: data?.usage?.completion_tokens || 0,
+      totalTokens: data?.usage?.total_tokens || 0,
+    }
+    log('debug', 'llm', `✓ ${model} — ${usage.totalTokens} tokens, ${content.length} chars`)
+
+    return { content, usage }
   } finally {
     clearTimeout(timeout)
   }
@@ -130,7 +243,7 @@ export async function chatJSON<T = unknown>(
   messages: LLMMessage[],
   options: LLMOptions = {}
 ): Promise<T> {
-  const raw = await chat(messages, { ...options, jsonMode: true })
+  const raw = await chat(messages, { ...options, jsonMode: true }) as string
   // Strip markdown code fences if present
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
   return JSON.parse(cleaned) as T
