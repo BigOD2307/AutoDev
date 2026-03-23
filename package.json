@@ -1,0 +1,28 @@
+{
+  "name": "autodev-agent",
+  "version": "1.0.0",
+  "description": "Agent IA autonome d'amélioration continue pour ZeroName et InsideAI",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "dry-run": "AUTODEV_DRY_RUN=true tsx src/index.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "glob": "^11.0.0",
+    "node-cron": "^3.0.3",
+    "openai": "^4.52.0",
+    "simple-git": "^3.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
