@@ -4,6 +4,7 @@ import { loadConfig } from './config.js'
 import { runAgent } from './core/agent.js'
 import { notifyStatus } from './core/notifier.js'
 import { log } from './utils/logger.js'
+import { startDashboard } from './dashboard/server.js'
 
 async function main() {
   const config = loadConfig()
@@ -18,6 +19,9 @@ async function main() {
     log('info', 'main', 'See autodev.config.example.json for configuration reference.')
     process.exit(1)
   }
+
+  // Start embedded dashboard
+  startDashboard()
 
   await notifyStatus(`${config.agent.name} started — ${config.projects.length} project(s)`)
 
