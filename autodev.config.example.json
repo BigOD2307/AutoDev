@@ -1,0 +1,67 @@
+{
+  "$schema": "./src/schema.json",
+  "agent": {
+    "name": "AutoDev",
+    "schedule": "0 */4 * * *",
+    "timezone": "UTC",
+    "language": "en",
+    "maxConcurrentRepos": 1,
+    "dryRun": false
+  },
+  "projects": [
+    {
+      "name": "my-webapp",
+      "repo": "https://github.com/username/my-webapp.git",
+      "branch": "main",
+      "buildCommand": "npm run build",
+      "installCommand": "npm install --no-audit --no-fund",
+      "language": "typescript",
+      "framework": "nextjs",
+      "modules": ["security", "performance", "seo", "content", "quality"],
+      "paths": {
+        "source": "src/",
+        "pages": "app/",
+        "components": "components/",
+        "api": "app/api/",
+        "config": "next.config.js",
+        "blog": null
+      },
+      "keyFiles": [
+        "app/layout.tsx",
+        "app/page.tsx",
+        "middleware.ts",
+        "package.json"
+      ],
+      "content": {
+        "enabled": false,
+        "blogFile": "lib/blog.ts",
+        "topics": [],
+        "targetAudience": "developers",
+        "language": "en"
+      }
+    }
+  ],
+  "notifications": {
+    "enabled": true,
+    "channels": [
+      {
+        "type": "webhook",
+        "url": "https://your-app.com/api/autodev/notify",
+        "secret": "your-secret-here"
+      }
+    ]
+  },
+  "llm": {
+    "provider": "openrouter",
+    "defaultModel": "",
+    "maxCostPerRunUSD": 0.10,
+    "temperature": 0.3,
+    "maxTokens": 16000
+  },
+  "git": {
+    "authorName": "AutoDev Agent",
+    "authorEmail": "autodev@localhost",
+    "branchPrefix": "autodev",
+    "commitPrefix": "autodev"
+  }
+}

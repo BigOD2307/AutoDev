@@ -8,69 +8,51 @@ import { log } from './utils/logger.js'
 async function main() {
   const config = loadConfig()
 
-  log('info', 'main', '🤖 AutoDev Agent starting up')
-  log('info', 'main', `Schedule: ${config.schedule}`)
-  log('info', 'main', `Dry run: ${config.dryRun}`)
-  log('info', 'main', `LLM model: ${config.llm.model}`)
-  log('info', 'main', `Repos: ${Object.keys(config.repos).join(', ')}`)
+  log('info', 'main', `${config.agent.name} starting up`)
+  log('info', 'main', `Schedule: ${config.agent.schedule}`)
+  log('info', 'main', `Dry run: ${config.agent.dryRun}`)
+  log('info', 'main', `Projects: ${config.projects.map(p => p.name).join(', ') || 'none configured'}`)
 
-  // Notify that the agent has started
-  await notifyStatus(`Agent démarré\nSchedule: ${config.schedule}\nMode: ${config.dryRun ? 'DRY RUN' : 'PRODUCTION'}`)
-
-  // Run once immediately on startup if AUTODEV_RUN_NOW is set
-  if (process.env.AUTODEV_RUN_NOW === 'true') {
-    log('info', 'main', 'Running immediately (AUTODEV_RUN_NOW=true)')
-    try {
-      await runAgent()
-    } catch (err) {
-      log('error', 'main', 'Immediate run failed', { error: String(err) })
-    }
-  }
-
-  // Schedule recurring runs
-  if (!cron.validate(config.schedule)) {
-    log('error', 'main', `Invalid cron schedule: ${config.schedule}`)
+  if (config.projects.length === 0) {
+    log('error', 'main', 'No projects configured. Create autodev.config.json or set AUTODEV_REPO_URL.')
+    log('info', 'main', 'See autodev.config.example.json for configuration reference.')
     process.exit(1)
   }
 
-  cron.schedule(config.schedule, async () => {
-    log('info', 'main', '⏰ Scheduled run triggered')
-    try {
-      await runAgent()
-    } catch (err) {
-      log('error', 'main', 'Scheduled run failed', { error: String(err) })
-      await notifyStatus(`❌ Erreur agent:\n${String(err).slice(0, 300)}`)
+  await notifyStatus(`${config.agent.name} started — ${config.projects.length} project(s)`)
+
+  if (process.env.AUTODEV_RUN_NOW === 'true') {
+    log('info', 'main', 'Running immediately (AUTODEV_RUN_NOW=true)')
+    try { await runAgent() } catch (err) {
+      log('error', 'main', `Immediate run failed: ${err}`)
+    }
+  }
+
+  const schedule = config.agent.schedule
+  if (!cron.validate(schedule)) {
+    log('error', 'main', `Invalid cron schedule: ${schedule}`)
+    process.exit(1)
+  }
+
+  cron.schedule(schedule, async () => {
+    log('info', 'main', 'Scheduled run triggered')
+    try { await runAgent() } catch (err) {
+      log('error', 'main', `Run failed: ${err}`)
+      await notifyStatus(`Error: ${String(err).slice(0, 300)}`)
     }
   })
 
-  log('info', 'main', `✅ Agent scheduled. Next run at: ${config.schedule}`)
-  log('info', 'main', 'Waiting for scheduled runs... (Ctrl+C to stop)')
+  log('info', 'main', `Scheduled. Waiting for next run...`)
 
-  // Keep process alive
-  process.on('SIGINT', async () => {
-    log('info', 'main', 'Agent shutting down (SIGINT)')
-    await notifyStatus('Agent arrêté (SIGINT)')
-    process.exit(0)
-  })
-
-  process.on('SIGTERM', async () => {
-    log('info', 'main', 'Agent shutting down (SIGTERM)')
-    await notifyStatus('Agent arrêté (SIGTERM)')
-    process.exit(0)
-  })
-
-  // Uncaught errors — notify and continue
+  process.on('SIGINT', () => { log('info', 'main', 'Shutting down'); process.exit(0) })
+  process.on('SIGTERM', () => { log('info', 'main', 'Shutting down'); process.exit(0) })
   process.on('uncaughtException', async (err) => {
-    log('error', 'main', 'Uncaught exception', { error: String(err) })
-    await notifyStatus(`⚠️ Exception non gérée:\n${String(err).slice(0, 300)}`)
+    log('error', 'main', `Uncaught: ${err}`)
+    await notifyStatus(`Uncaught exception: ${String(err).slice(0, 300)}`)
   })
-
-  process.on('unhandledRejection', async (reason) => {
-    log('error', 'main', 'Unhandled rejection', { reason: String(reason) })
+  process.on('unhandledRejection', (reason) => {
+    log('error', 'main', `Unhandled rejection: ${reason}`)
   })
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err)
-  process.exit(1)
-})
+main().catch((err) => { console.error('Fatal:', err); process.exit(1) })

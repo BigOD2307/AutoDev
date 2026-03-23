@@ -95,7 +95,7 @@ async function callOpenRouter(
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://autodev.dickenai.com',
+        'HTTP-Referer': process.env.AUTODEV_URL || 'https://github.com/autodev-agent',
       },
       body: JSON.stringify({
         model,

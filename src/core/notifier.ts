@@ -17,18 +17,14 @@ export interface NotificationPayload {
 }
 
 /**
- * Send a WhatsApp notification about an improvement.
- * Uses the ZeroName notify endpoint which forwards to WhatsApp.
+ * Send a notification about an improvement.
+ * Supports multiple channels: webhook, slack, discord.
  */
 export async function notifyImprovement(
-  repo: RepoConfig,
-  improvement: Improvement,
-  branch: string,
-  buildPassed: boolean
+  repo: RepoConfig, improvement: Improvement, branch: string, buildPassed: boolean
 ): Promise<void> {
   const config = loadConfig()
 
-  const compareUrl = getCompareUrl(repo, branch)
   const payload: NotificationPayload = {
     project: repo.name,
     module: improvement.module,
@@ -38,99 +34,106 @@ export async function notifyImprovement(
     impact: improvement.impact,
     filesChanged: improvement.changes.map(c => c.filePath),
     buildPassed,
-    compareUrl,
+    compareUrl: getCompareUrl(repo, branch),
   }
 
-  const message = formatWhatsAppMessage(payload)
-
-  if (config.dryRun) {
-    log('info', 'notifier', `[DRY RUN] Would send WhatsApp notification:\n${message}`)
+  if (config.agent.dryRun) {
+    log('info', 'notifier', `[DRY RUN] Would notify:\n${formatMessage(payload)}`)
     return
   }
 
-  // Try the ZeroName notify endpoint
-  try {
-    await sendViaEndpoint(config, message)
-    log('success', 'notifier', `WhatsApp notification sent for ${improvement.title}`)
+  if (!config.notifications.enabled || config.notifications.channels.length === 0) {
+    log('info', 'notifier', `Notifications disabled. Improvement: ${improvement.title}`)
     return
-  } catch (err) {
-    log('warn', 'notifier', `Notify endpoint failed, trying direct`, { error: String(err) })
   }
 
-  // Log the message so it's not lost even if notification fails
-  log('info', 'notifier', `Notification message:\n${message}`)
-}
-
-/**
- * Send notification via ZeroName's API endpoint.
- */
-async function sendViaEndpoint(config: ReturnType<typeof loadConfig>, message: string): Promise<void> {
-  if (!config.notify.url || !config.notify.secret) {
-    throw new Error('Notify URL or secret not configured')
-  }
-
-  const res = await fetch(config.notify.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      secret: config.notify.secret,
-      phone: config.notify.phone,
-      message,
-    }),
-  })
-
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Notify endpoint returned ${res.status}: ${text.slice(0, 200)}`)
+  for (const channel of config.notifications.channels) {
+    try {
+      await sendToChannel(channel, payload)
+      log('success', 'notifier', `Notified via ${channel.type}`)
+    } catch (err) {
+      log('warn', 'notifier', `${channel.type} notification failed: ${err}`)
+    }
   }
 }
 
-/**
- * Format a clean WhatsApp message for the improvement.
- */
-function formatWhatsAppMessage(payload: NotificationPayload): string {
-  const impactEmoji = {
-    low: '🟡',
-    medium: '🟠',
-    high: '🔴',
-  }[payload.impact] || '⚪'
+async function sendToChannel(
+  channel: { type: string; url: string; secret?: string; token?: string },
+  payload: NotificationPayload
+): Promise<void> {
+  const message = formatMessage(payload)
 
-  const buildEmoji = payload.buildPassed ? '✅' : '❌'
+  switch (channel.type) {
+    case 'webhook': {
+      const res = await fetch(channel.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret: channel.secret,
+          message,
+          payload,
+        }),
+      })
+      if (!res.ok) throw new Error(`Webhook ${res.status}`)
+      break
+    }
+    case 'slack': {
+      const res = await fetch(channel.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: message }),
+      })
+      if (!res.ok) throw new Error(`Slack ${res.status}`)
+      break
+    }
+    case 'discord': {
+      const res = await fetch(channel.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: message.slice(0, 2000) }),
+      })
+      if (!res.ok) throw new Error(`Discord ${res.status}`)
+      break
+    }
+    default:
+      log('warn', 'notifier', `Unknown channel type: ${channel.type}`)
+  }
+}
 
-  return `🤖 *AutoDev — Nouvelle amélioration*
+function formatMessage(payload: NotificationPayload): string {
+  const impactIcon = { low: 'LOW', medium: 'MEDIUM', high: 'HIGH' }[payload.impact] || payload.impact
+  const buildStatus = payload.buildPassed ? 'PASSED' : 'FAILED'
 
-📦 *Projet :* ${payload.project}
-🏷️ *Type :* ${payload.module}
-${impactEmoji} *Impact :* ${payload.impact}
-📝 *Branche :* ${payload.branch}
+  return `AutoDev — New Improvement
 
-*${payload.title}*
+Project: ${payload.project}
+Module:  ${payload.module}
+Impact:  ${impactIcon}
+Branch:  ${payload.branch}
+
+${payload.title}
 ${payload.description}
 
-📁 *Fichiers modifiés :*
-${payload.filesChanged.map(f => `  • ${f}`).join('\n')}
+Files changed:
+${payload.filesChanged.map(f => `  - ${f}`).join('\n')}
 
-Build : ${buildEmoji} ${payload.buildPassed ? 'Passé' : 'Échoué'}
-
-🔗 *Review :* ${payload.compareUrl || 'N/A'}
-
-_Réponds "merge" pour approuver ou "skip" pour ignorer._`
+Build: ${buildStatus}
+Review: ${payload.compareUrl || 'N/A'}`
 }
 
-/**
- * Send a simple status notification (e.g., agent started, error, etc.)
- */
 export async function notifyStatus(message: string): Promise<void> {
   const config = loadConfig()
-
-  if (config.dryRun) {
-    log('info', 'notifier', `[DRY RUN] Status: ${message}`)
+  if (config.agent.dryRun || !config.notifications.enabled) {
+    log('info', 'notifier', `[Status] ${message}`)
     return
   }
 
-  try {
-    await sendViaEndpoint(config, `🤖 *AutoDev Status*\n\n${message}`)
-  } catch {
-    log('warn', 'notifier', `Could not send status notification`)
+  for (const channel of config.notifications.channels) {
+    try {
+      await sendToChannel(channel, {
+        project: 'system', module: 'status', branch: '', title: message,
+        description: '', impact: 'low', filesChanged: [], buildPassed: true, compareUrl: '',
+      })
+    } catch { /* silent */ }
   }
 }

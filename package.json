@@ -1,19 +1,38 @@
 {
   "name": "autodev-agent",
-  "version": "1.0.0",
-  "description": "Agent IA autonome d'amélioration continue pour ZeroName et InsideAI",
+  "version": "2.0.0",
+  "description": "Autonomous AI agent that continuously improves your codebase — security, performance, SEO, content, and AI quality",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "dry-run": "AUTODEV_DRY_RUN=true tsx src/index.ts"
+    "dry-run": "AUTODEV_DRY_RUN=true AUTODEV_RUN_NOW=true tsx src/index.ts",
+    "dashboard": "tsx src/dashboard/server.ts"
   },
+  "keywords": [
+    "ai-agent",
+    "autonomous",
+    "continuous-improvement",
+    "code-quality",
+    "seo",
+    "security",
+    "performance",
+    "llm",
+    "openrouter",
+    "devops"
+  ],
+  "author": "Ousmane Dicko <ousmane@dickenai.com> (https://dickenai.com)",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BigOD2307/AutoDev.git"
+  },
+  "homepage": "https://github.com/BigOD2307/AutoDev",
   "dependencies": {
     "dotenv": "^17.3.1",
     "glob": "^11.0.0",
     "node-cron": "^3.0.3",
-    "openai": "^4.52.0",
     "simple-git": "^3.27.0"
   },
   "devDependencies": {

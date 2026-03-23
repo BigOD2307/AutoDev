@@ -3,6 +3,7 @@ import { readRepoFile, listRepoFiles } from './git.js'
 import { chatJSON } from '../utils/llm.js'
 import { log } from '../utils/logger.js'
 import { moduleToTaskType } from '../utils/router.js'
+import { getMemory } from '../memory/index.js'
 
 export type ImprovementModule = 'seo' | 'content' | 'performance' | 'security' | 'quality'
 
@@ -21,38 +22,37 @@ export interface Improvement {
   commitMessage: string
 }
 
+/**
+ * Module prompts are intentionally generic — they work for ANY project.
+ * The LLM adapts based on the code context it receives.
+ */
 const MODULE_PROMPTS: Record<ImprovementModule, string> = {
-  seo: `Tu es un expert SEO/GEO pour l'Afrique francophone. Analyse le code et propose UNE amélioration SEO concrète.
-Priorités : meta tags, Open Graph, JSON-LD structured data, generateMetadata(), alt tags images, sitemap, canonical URLs.
-Le site cible le marché de l'emploi en Afrique de l'Ouest (Sénégal, Côte d'Ivoire, Mali, Cameroun, etc).
-NE TOUCHE PAS à la logique métier, seulement le SEO.`,
+  seo: `You are an expert SEO engineer. Analyze the code and propose ONE concrete SEO improvement.
+Focus on: meta tags, Open Graph, JSON-LD structured data, generateMetadata(), alt tags, sitemap, canonical URLs, hreflang.
+DO NOT touch business logic — only SEO.`,
 
-  content: `Tu es un expert en content marketing pour l'emploi en Afrique francophone.
-Génère UN article de blog complet (~1500 mots, en français) optimisé SEO.
-L'article doit être ajouté au fichier lib/blog.ts dans le tableau 'posts'.
-Thèmes possibles : recherche d'emploi en Afrique, CV, entretien, IA pour la carrière, secteurs qui recrutent.
-Respecte EXACTEMENT le format BlogPost existant (slug, title, description, date, readTime, category, emoji, content, relatedSlugs).
-Le contenu doit être utile, concret et adapté au marché africain.`,
+  content: `You are an expert content strategist and writer.
+Generate ONE complete blog article (~1500 words) optimized for SEO.
+The article must be added to the blog system found in the codebase.
+Match the EXACT format of existing blog entries. Content should be useful, concrete, and relevant to the project's audience.
+Write in the same language as the existing content.`,
 
-  performance: `Tu es un expert performance web / Next.js. Analyse le code et propose UNE amélioration de performance.
-Priorités : imports dynamiques (lazy loading), optimisation images (next/image), réduction bundle,
-mise en cache, optimisation API routes (timeouts, parallel requests), tree-shaking.
-NE CASSE PAS la fonctionnalité. L'amélioration doit être safe.`,
+  performance: `You are an expert web performance engineer. Analyze the code and propose ONE performance improvement.
+Focus on: dynamic imports (lazy loading), image optimization, bundle reduction, caching, parallel API calls, tree-shaking.
+DO NOT break functionality. The improvement must be safe.`,
 
-  security: `Tu es un expert sécurité web. Analyse le code et propose UNE amélioration de sécurité.
-Priorités : validation des inputs (zod), rate limiting, headers CSP, protection XSS/CSRF,
-vérification d'auth sur les API routes, exposition de clés côté client, npm audit fixes.
-NE CASSE PAS la fonctionnalité. L'amélioration doit être safe et rétro-compatible.`,
+  security: `You are an expert web security engineer. Analyze the code and propose ONE security improvement.
+Focus on: input validation (zod), rate limiting, CSP headers, XSS/CSRF protection, auth checks, API key exposure, dependency vulnerabilities.
+DO NOT break functionality. The improvement must be safe and backward-compatible.`,
 
-  quality: `Tu es un expert en IA et prompt engineering. Analyse les prompts système et propose UNE amélioration.
-Priorités : clarté du prompt, structure, exemples dans le prompt, instructions de format,
-gestion des edge cases, cohérence de la langue française.
-NE CHANGE PAS la logique métier ou le format de sortie. Améliore seulement la qualité du prompt.`,
+  quality: `You are an expert in AI and prompt engineering. Analyze the system prompts and propose ONE improvement.
+Focus on: clarity, structure, examples, format instructions, edge cases, language consistency.
+DO NOT change business logic or output format. Only improve prompt quality.`,
 }
 
 /**
  * Analyze a repo for improvements in a specific module.
- * Returns null if no good improvement was found.
+ * Injects memory context so the LLM learns from past mistakes.
  */
 export async function analyzeForImprovement(
   repo: RepoConfig,
@@ -60,49 +60,55 @@ export async function analyzeForImprovement(
 ): Promise<Improvement | null> {
   log('info', 'analyzer', `Analyzing ${repo.name} for ${module} improvements`)
 
-  // Read key files for context
   const context = await buildContext(repo, module)
   if (!context) {
     log('warn', 'analyzer', `No context available for ${repo.name}/${module}`)
     return null
   }
 
+  // Inject memory: past errors, fragile files, successful strategies
+  const memory = getMemory()
+  const memoryContext = memory.getContextForLLM(repo.name, module)
+
   const systemPrompt = `${MODULE_PROMPTS[module]}
 
-## RÈGLES CRITIQUES
-1. Tu dois retourner un JSON VALIDE, rien d'autre
-2. Chaque changement doit inclure le contenu COMPLET du fichier modifié (pas de "..." ou commentaires de troncature)
-3. NE CRÉE PAS de nouveaux fichiers sauf si le module est 'content' (articles blog)
-4. Les changements doivent être MINIMAUX et CIBLÉS — une seule amélioration à la fois
-5. Le code modifié doit compiler et passer le build
-6. IMPORTANT : ne casse RIEN. Ce code est en PRODUCTION
+## PROJECT INFO
+- Name: ${repo.name}
+- Framework: ${repo.framework}
+- Build command: ${repo.buildCmd}
 
-## FORMAT DE RÉPONSE (JSON)
+${memoryContext ? `## AGENT MEMORY (learn from past runs)\n${memoryContext}\n` : ''}
+## CRITICAL RULES
+1. Return VALID JSON only, nothing else
+2. Each change must include the COMPLETE file content (no "..." or truncation)
+3. DO NOT create new files unless the module is 'content'
+4. Changes must be MINIMAL and TARGETED — one improvement at a time
+5. Modified code MUST compile and pass the build
+6. IMPORTANT: this code is in PRODUCTION — do NOT break anything
+${memory.getFragileFiles(repo.name).length > 0
+    ? `7. FRAGILE FILES — be extra careful with: ${memory.getFragileFiles(repo.name).join(', ')}\n` : ''}
+## RESPONSE FORMAT (JSON)
 {
-  "title": "Titre court de l'amélioration",
-  "description": "Description détaillée de ce qui a été amélioré et pourquoi",
+  "title": "Short improvement title",
+  "description": "What was improved and why",
   "impact": "low|medium|high",
   "changes": [
     {
-      "filePath": "chemin/relatif/du/fichier.ts",
-      "newContent": "CONTENU COMPLET DU FICHIER MODIFIÉ"
+      "filePath": "relative/path/to/file.ts",
+      "newContent": "COMPLETE FILE CONTENT"
     }
   ],
-  "commitMessage": "type(scope): description courte"
+  "commitMessage": "type(scope): short description"
 }
 
-Si tu ne trouves AUCUNE amélioration valable, retourne : { "skip": true, "reason": "..." }`
+If you find NO valid improvement, return: { "skip": true, "reason": "..." }`
 
-  const userPrompt = `Voici le code du projet ${repo.name} :\n\n${context}`
+  const userPrompt = `Here is the source code of ${repo.name}:\n\n${context}`
 
   try {
     const result = await chatJSON<{
-      skip?: boolean
-      reason?: string
-      title?: string
-      description?: string
-      impact?: string
-      changes?: { filePath: string; newContent: string }[]
+      skip?: boolean; reason?: string; title?: string; description?: string
+      impact?: string; changes?: { filePath: string; newContent: string }[]
       commitMessage?: string
     }>([
       { role: 'system', content: systemPrompt },
@@ -110,85 +116,62 @@ Si tu ne trouves AUCUNE amélioration valable, retourne : { "skip": true, "reaso
     ], { maxTokens: 16000, temperature: 0.4, taskType: moduleToTaskType(module) })
 
     if (result.skip) {
-      log('info', 'analyzer', `No improvement found for ${module}: ${result.reason}`)
+      log('info', 'analyzer', `No improvement found: ${result.reason}`)
       return null
     }
 
     if (!result.title || !result.changes || result.changes.length === 0) {
-      log('warn', 'analyzer', `Invalid LLM response for ${module}`, result)
+      log('warn', 'analyzer', `Invalid LLM response`, result)
       return null
     }
 
-    // Build the file changes with old content for diffing
-    const changes: FileChange[] = []
-    for (const change of result.changes) {
-      const oldContent = readRepoFile(repo, change.filePath) || ''
-      changes.push({
-        filePath: change.filePath,
-        oldContent,
-        newContent: change.newContent,
-      })
-    }
+    const changes: FileChange[] = result.changes.map(change => ({
+      filePath: change.filePath,
+      oldContent: readRepoFile(repo, change.filePath) || '',
+      newContent: change.newContent,
+    }))
 
+    const config = await import('../config.js').then(m => m.loadConfig())
     const improvement: Improvement = {
       module,
       title: result.title,
       description: result.description || '',
       impact: (result.impact as 'low' | 'medium' | 'high') || 'medium',
       changes,
-      commitMessage: result.commitMessage || `autodev(${module}): ${result.title}`,
+      commitMessage: result.commitMessage || `${config.git.commitPrefix}(${module}): ${result.title}`,
     }
 
-    log('success', 'analyzer', `Found improvement: ${improvement.title}`, {
-      module,
-      filesChanged: changes.map(c => c.filePath),
-      impact: improvement.impact,
+    log('success', 'analyzer', `Found: ${improvement.title}`, {
+      files: changes.map(c => c.filePath), impact: improvement.impact,
     })
-
     return improvement
   } catch (err) {
-    log('error', 'analyzer', `LLM analysis failed for ${module}`, { error: String(err) })
+    log('error', 'analyzer', `LLM analysis failed`, { error: String(err) })
     return null
   }
 }
 
-/**
- * Build context string from key files for the LLM.
- */
 async function buildContext(repo: RepoConfig, module: ImprovementModule): Promise<string | null> {
   const parts: string[] = []
   let totalChars = 0
-  const MAX_CHARS = 80_000 // Keep context manageable
+  const MAX_CHARS = 80_000
 
-  // Module-specific file selection
+  // Get target files based on module + project config
   const targetFiles = getTargetFiles(repo, module)
 
   for (const filePath of targetFiles) {
     if (totalChars > MAX_CHARS) break
-
     const content = readRepoFile(repo, filePath)
     if (!content) continue
-
     const block = `\n--- FILE: ${filePath} ---\n${content}\n--- END: ${filePath} ---\n`
     parts.push(block)
     totalChars += block.length
   }
 
-  // For content module, also list existing blog posts to avoid duplicates
-  if (module === 'content') {
-    const blogContent = readRepoFile(repo, 'lib/blog.ts')
-    if (blogContent) {
-      // Extract existing slugs
-      const slugs = [...blogContent.matchAll(/slug:\s*['"]([^'"]+)['"]/g)].map(m => m[1])
-      parts.push(`\n--- EXISTING BLOG SLUGS (do not duplicate) ---\n${slugs.join('\n')}\n`)
-    }
-  }
-
   if (parts.length === 0) return null
 
-  // Add file listing for extra context
   try {
-    const allFiles = await listRepoFiles(repo, '**/*.{ts,tsx,js,jsx}')
+    const allFiles = await listRepoFiles(repo, '**/*.{ts,tsx,js,jsx,py,dart,vue,svelte}')
     parts.unshift(`\n--- PROJECT FILE TREE (${allFiles.length} files) ---\n${allFiles.slice(0, 100).join('\n')}\n`)
   } catch { /* ignore */ }
 
@@ -196,54 +179,35 @@ async function buildContext(repo: RepoConfig, module: ImprovementModule): Promis
 }
 
 /**
- * Select which files to read based on the improvement module.
+ * Dynamically determine target files based on module + project structure.
  */
 function getTargetFiles(repo: RepoConfig, module: ImprovementModule): string[] {
-  const base = repo.keyFiles
+  const base = [...repo.keyFiles]
+  const project = repo.project
 
-  const moduleSpecific: Record<ImprovementModule, string[]> = {
-    seo: [
-      'app/layout.tsx',
-      'app/page.tsx',
-      'app/ressources/page.tsx',
-      'app/ressources/[slug]/page.tsx',
-      'app/essai/page.tsx',
-      'app/auth/page.tsx',
-      'next.config.js',
-    ],
-    content: [
-      'lib/blog.ts',
-      'app/ressources/[slug]/page.tsx',
-      'types/analysis.ts',
-    ],
-    performance: [
-      'app/layout.tsx',
-      'app/page.tsx',
-      'lib/aiAnalyzer.ts',
-      'lib/jobsAgent.ts',
-      'lib/openRouter.ts',
-      'app/api/analyze/route.ts',
-      'next.config.js',
-    ],
-    security: [
-      'middleware.ts',
-      'lib/auth.ts',
-      'lib/adminAuth.ts',
-      'lib/rateLimit.ts',
-      'lib/credits.ts',
-      'next.config.js',
-      'app/api/auth/login/route.ts',
-      'app/api/auth/register/route.ts',
-      'app/api/analyze/route.ts',
-    ],
-    quality: [
-      'lib/aiAnalyzer.ts',
-      'lib/openRouter.ts',
-      'lib/jobsAgent.ts',
-    ],
+  // Add module-specific files based on project's configured paths
+  const paths = project.paths
+
+  switch (module) {
+    case 'seo':
+      if (paths.pages) base.push(`${paths.pages}layout.tsx`, `${paths.pages}page.tsx`)
+      if (paths.config) base.push(paths.config)
+      break
+    case 'content':
+      if (project.content.blogFile) base.push(project.content.blogFile)
+      break
+    case 'performance':
+      if (paths.pages) base.push(`${paths.pages}layout.tsx`, `${paths.pages}page.tsx`)
+      if (paths.config) base.push(paths.config)
+      break
+    case 'security':
+      if (paths.api) base.push('middleware.ts', 'middleware.js')
+      if (paths.config) base.push(paths.config)
+      break
+    case 'quality':
+      // Key files are usually enough for quality analysis
+      break
   }
 
-  // Merge and deduplicate
-  const files = [...new Set([...moduleSpecific[module], ...base])]
-  return files
+  return [...new Set(base)]
 }
