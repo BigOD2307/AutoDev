@@ -38,4 +38,4 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ---
 
-**Dicken AI** — Building the future of autonomous development.
+**Dicken AI** — Building AI for Africa and the world.
